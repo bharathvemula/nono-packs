@@ -103,13 +103,15 @@ function confirmNonoDenial(blockedPath: string): boolean {
   }
 }
 
-// Output that explicitly names nono as the denying sandbox is conclusive on
-// its own; anything else needs `nono why` to report DENIED for the concrete
-// path before the failure is attributed to the sandbox.
+// A concrete path is only ever confirmed by `nono why` reporting DENIED for
+// it. The word "nono" in the error text proves nothing about a path — it
+// appears in paths themselves (including nono's own config directory, e.g.
+// ~/.config/nono/profiles/...) and must never skip the provenance check.
+// Only when no path could be extracted does error output that explicitly
+// names nono count as self-attributed.
 function isConfirmedDenial(text: string, blockedPath: string | null): boolean {
-  if (/\bnono\b/i.test(text)) return true
-  if (!blockedPath) return false
-  return confirmNonoDenial(blockedPath)
+  if (blockedPath) return confirmNonoDenial(blockedPath)
+  return /\bnono\b/i.test(text)
 }
 
 function nonoConfigHome(): string {
