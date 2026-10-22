@@ -312,11 +312,12 @@ function v1Hooks() {
 
     // Fires after every tool call. The v1 result carries no structured
     // status, so the result text is scanned for a denial signature — but
-    // grant remediation is appended only once nono's role is confirmed (the
-    // output names nono, or `nono why --self` reports DENIED for the
-    // extracted path). Unconfirmed matches append nothing: v1 cannot
-    // distinguish a failed call from a successful result whose content
-    // merely mentions a denial, and a false notice is worse than none.
+    // grant remediation is appended only once `nono why --self` reports
+    // DENIED for the extracted path. With no extractable path there is
+    // nothing to provenance-check, and the word fallback cannot confirm
+    // anything here: v1 cannot distinguish a failed call from a successful
+    // result whose content merely mentions nono and a denial, so nothing
+    // is appended — a false notice is worse than none.
     "tool.execute.after": async (
       input: { tool: string; sessionID: string; callID: string; args: unknown },
       result: unknown,
@@ -328,7 +329,8 @@ function v1Hooks() {
       if (!liveCaps) return
 
       const blockedPath = extractPath(JSON.stringify(input)) ?? extractPath(resultText)
-      if (!isConfirmedDenial(resultText, blockedPath)) return
+      if (!blockedPath) return
+      if (!confirmNonoDenial(blockedPath)) return
 
       appendGuidance(result, buildGuidance(liveCaps, blockedPath))
     },
