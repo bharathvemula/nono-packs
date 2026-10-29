@@ -5,8 +5,15 @@ import * as path from "path"
 const DENIAL_PATTERN =
   /operation not permitted|permission denied|eperm|eacces|sandbox.*denied|landlock/i
 
-// Matches an absolute or home-relative path only at a token boundary (start
-// of text, whitespace, or a quote/bracket). Anchoring matters: the previous
+// Match quoted paths before token paths. Tool errors commonly quote paths,
+// and the quotes are the only reliable delimiters when a path contains
+// whitespace or punctuation. extractPath parses JSON-stringified inputs and
+// applies these expressions to their decoded string values.
+const SINGLE_QUOTED_PATH_RE = /(?:^|[\s([{,:])'((?:~\/|\/|\.{0,2}\/)?[^'\r\n]*\/[^'\r\n]+)'/
+const DOUBLE_QUOTED_PATH_RE = /(?:^|[\s([{,:])"((?:~\/|\/|\.{0,2}\/)?[^"\r\n]*\/[^"\r\n]+)"/
+
+// Matches an unquoted absolute or home-relative path only at a token boundary
+// (start of text, whitespace, or a bracket). Anchoring matters: the previous
 // unanchored pattern matched the first "/" inside a relative path, so
 // "src/main.ts" fabricated the root-absolute path "/main.ts".
 const ABS_PATH_RE = /(?:^|[\s"'`([{])((?:~\/|\/)[^\s"'`,;:]+)/
@@ -54,30 +61,107 @@ function readCaps(): Caps | null {
   }
 }
 
-function extractPath(text: string): string | null {
+function normalizePath(candidate: string): string | null {
+  if (/[\x00-\x1f\x7f]/.test(candidate)) return null
+  if (candidate.startsWith("~/")) {
+    const expanded = (process.env.HOME ?? "~") + "/" + candidate.slice(2)
+    return expanded.length > 1 ? expanded : null
+  }
+  if (candidate.startsWith("/")) return candidate.length > 1 ? candidate : null
+
+  // Reject slash-containing prose and URLs. A relative path either begins
+  // with a dot segment or ends in a file-like segment carrying an extension.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) return null
+  const segments = candidate.split("/")
+  const last = segments[segments.length - 1]
+  if (candidate.startsWith(".") || last.includes(".")) {
+    return path.resolve(process.cwd(), candidate)
+  }
+  return null
+}
+
+function extractPathFromText(text: string): string | null {
+  const singleQuoted = SINGLE_QUOTED_PATH_RE.exec(text)
+  if (singleQuoted) return normalizePath(singleQuoted[1])
+
+  const doubleQuoted = DOUBLE_QUOTED_PATH_RE.exec(text)
+  if (doubleQuoted) return normalizePath(doubleQuoted[1])
+
   const abs = ABS_PATH_RE.exec(text)
   if (abs) {
     const candidate = abs[1].replace(/[).\]]+$/, "")
-    if (candidate.startsWith("~/")) {
-      const expanded = (process.env.HOME ?? "~") + "/" + candidate.slice(2)
-      return expanded.length > 1 ? expanded : null
-    }
-    if (candidate.length > 1) return candidate
+    return normalizePath(candidate)
   }
   const rel = REL_PATH_RE.exec(text)
   if (rel) {
     const candidate = rel[1].replace(/[).\]]+$/, "")
-    // Reject slash-containing words that are not plausible paths ("and/or",
-    // "example.com/a/b"): a relative path token either starts with a dot
-    // segment (".opencode/...", "./...", "../...") or ends in a file-like
-    // segment carrying an extension.
-    const segments = candidate.split("/")
-    const last = segments[segments.length - 1]
-    if (candidate.startsWith(".") || last.includes(".")) {
-      return path.resolve(process.cwd(), candidate)
+    return normalizePath(candidate)
+  }
+  return null
+}
+
+function isPathField(key: string): boolean {
+  // Environment variables such as PATH and NODE_PATH are path lists, not a
+  // single filesystem target suitable for `nono why --path`.
+  if (key === key.toUpperCase() && /(?:^|_)PATH$/.test(key)) return false
+  const normalized = key.replace(/[_-]/g, "").toLowerCase()
+  return normalized.endsWith("path") ||
+    ["cwd", "dir", "directory", "file", "files", "filename", "filenames"].includes(normalized)
+}
+
+function extractExplicitPath(value: unknown, pathField = false): string | null {
+  if (typeof value === "string") return pathField ? normalizePath(value) : null
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractExplicitPath(item, pathField)
+      if (found) return found
+    }
+    return null
+  }
+  if (value && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      const found = extractExplicitPath(item, pathField || isPathField(key))
+      if (found) return found
     }
   }
   return null
+}
+
+function extractEmbeddedPath(value: unknown): string | null {
+  if (typeof value === "string") return extractPathFromText(value)
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = extractEmbeddedPath(item)
+      if (found) return found
+    }
+    return null
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) {
+      const found = extractEmbeddedPath(item)
+      if (found) return found
+    }
+  }
+  return null
+}
+
+function extractPath(text: string): string | null {
+  try {
+    const value = JSON.parse(text)
+    return extractExplicitPath(value) ?? extractEmbeddedPath(value)
+  } catch {
+    return extractPathFromText(text)
+  }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function inlineCode(value: string): string {
+  let fence = "`"
+  while (value.includes(fence)) fence += "`"
+  return fence + value + fence
 }
 
 // Confirm with nono itself that the sandbox denies this path before any
@@ -168,10 +252,10 @@ function buildGuidance(caps: Caps, blockedPath: string | null): string {
   const net = caps.net_blocked ? "blocked" : "allowed"
   const display = blockedPath ?? "<blocked-path>"
   const whyCmd = blockedPath
-    ? `nono why --self --path ${blockedPath} --op read`
+    ? `nono why --self --path ${shellQuote(blockedPath)} --op read`
     : "nono why --self --path <blocked-path> --op read"
   const allowCmd = blockedPath
-    ? `nono run --allow ${blockedPath} -- opencode --standalone`
+    ? `nono run --allow ${shellQuote(blockedPath)} -- opencode --standalone`
     : "nono run --allow <blocked-path> -- opencode --standalone"
 
   return [
@@ -193,7 +277,7 @@ function buildGuidance(caps: Caps, blockedPath: string | null): string {
     buildCredentialLines(caps),
     "",
     "Next steps (in order):",
-    "1. Run `" + whyCmd + "` and include output verbatim.",
+    "1. Run " + inlineCode(whyCmd) + " and include output verbatim.",
     "2. Present the user with exactly these two options:",
     "   Option A (quick fix):  " + allowCmd,
     "   Option B (persistent): draft a profile to " + profileDraftsDir() + "/<name>.json",
