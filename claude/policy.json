@@ -69,6 +69,11 @@
     ],
     "allow_localhost": true
   },
+  "environment": {
+    "set_vars": {
+      "LC_MESSAGES": "C"
+    }
+  },
   "diagnostics": {
     "suppress_system_services": ["forbidden-exec-sugid"]
   },

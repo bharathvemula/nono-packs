@@ -42,6 +42,11 @@ When Claude is running inside a `nono` sandbox and a tool call fails due to bloc
 - recommend restarting with additional `--allow` access when needed
 - recommend creating a reusable `nono` profile for repeated access
 
+The profile also sets `LC_MESSAGES=C` so denial diagnostics stay in English and
+can be matched reliably on localized systems. It does not filter inherited
+environment variables or change other locale categories. An explicitly set
+`LC_ALL` still takes precedence, following standard locale rules.
+
 This prevents common bad guidance such as retrying the same action, suggesting `chmod`, or treating the failure like a normal OS permissions issue.
 
 ## Sandbox Preparation
